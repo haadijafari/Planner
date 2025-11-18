@@ -1,20 +1,29 @@
-# Django Template
+# Planner
 
-This is a **Django and Docker Integration Template** using **UV python package manager**.
+This is an **Ultimate Planner Project** (using **UV python package manager**).
 
-![Django](./django.jpg)
+![Planner](./Planner.avif)
+
+## Features
+
+- Add and Track Your Routines
+- Track Your Habits
+- Track Your Sleep
+- Track Your Mood
+- Organize Your Daily Notes
+- Financial Management
+- Track Your Daily Studying
+- Track Your Goals
+- Develop Your Reading
+- Learn From Your Day
+- etc.
 
 ## Tech Stack
 
 - **Backend:** Django, Django REST Framework
+- **BacFrontend:** HTML, CSS, Bootstrap
 - **Database:** PostgreSQL
 - **Other:** Docker,Uv package manager, Shell
-
-you can also use integrate with:
-
-- **Frontend:** React, Next.js, TypeScript
-- **Caching/Message Broker:** Redis
-- **Web Server/Reverse Proxy:** Nginx
 
 ## Setup
 
