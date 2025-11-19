@@ -1,5 +1,5 @@
 from django.db import models, transaction
-from django.db.models import F
+from django.db.models import F, Max
 from django.utils.translation import gettext_lazy as _
 from django.conf import settings
 
@@ -71,13 +71,14 @@ class RoutineItem(models.Model):
         max_length=255,
         blank=False, 
         null=False,
-        # removed 'required=True' as it's not a valid model field option
+        verbose_name=_("Title"),
         help_text=_("What is the routine item? (e.g., 'Brushing Teeth', 'Meditate 10 mins')")
     )
     
     description = models.TextField(
         blank=True, 
         null=True,
+        verbose_name=_("Description"),
         help_text=_("Any extra details about the item (optional)")
     )
 
@@ -90,7 +91,9 @@ class RoutineItem(models.Model):
         # We allow it to be blank, then set the default in the save() method
         null=True, 
         blank=True,
-        help_text=_("Priority order (lower numbers come first). Leave blank to add to the end.")
+        db_index=True,
+        verbose_name=_("Priority"),
+        help_text=_("Priority order (lower numbers come first). Leave blank to add to the end."),
     )
     
     # --- Timestamps ---
@@ -114,73 +117,87 @@ class RoutineItem(models.Model):
             self.title = self.title.strip().title()
 
         # --- Priority Standardize ---
-        # Get all other items for this routine
-        qs = RoutineItem.objects.filter(routine=self.routine)
+        # Start an atomic block to ensure database integrity during reordering
+        with transaction.atomic():
+            if self.pk is None:
+                # --- CREATE NEW ITEM ---
+                # Calculate priority: put it at the end if not specified
+                if self.priority is None:
+                    # Get the current max priority
+                    max_p = RoutineItem.objects.filter(routine=self.routine).aggregate(Max('priority'))['priority__max']
+                    self.priority = (max_p or 0) + 1
+                else:
+                    # Insert in middle: Shift existing items down
+                    RoutineItem.objects.filter(
+                        routine=self.routine,
+                        priority__gte=self.priority
+                    ).update(priority=F('priority') + 1)
+            
+            else:
+                # --- UPDATE EXISTING ITEM ---
+                try:
+                    old_instance = RoutineItem.objects.get(pk=self.pk)
+                except RoutineItem.DoesNotExist:
+                    # Should not happen, but fallback
+                    super().save(*args, **kwargs)
+                    return
+
+                # 1. Handle Changing Routines (e.g: Moving item from Morning to Evening)
+                if old_instance.routine != self.routine:
+                    # Step A: Close the gap in the OLD routine
+                    RoutineItem.objects.filter(
+                        routine=old_instance.routine,
+                        priority__gt=old_instance.priority
+                    ).update(priority=F('priority') - 1)
+                    
+                    # Step B: Handle placement in NEW routine
+                    if self.priority is None:
+                        # User didn't specify where, put at end
+                        max_p = RoutineItem.objects.filter(routine=self.routine).aggregate(Max('priority'))['priority__max']
+                        self.priority = (max_p or 0) + 1
+                    else:
+                        # User specified a slot, shift others down to make room
+                        RoutineItem.objects.filter(
+                            routine=self.routine,
+                            priority__gte=self.priority
+                        ).update(priority=F('priority') + 1)
+
+                # 2. Handle Reordering within same Routine
+                elif old_instance.priority != self.priority:
+                    # Fix: If user enters 'None' on edit, move to end
+                    if self.priority is None:
+                        max_p = RoutineItem.objects.filter(routine=self.routine).aggregate(Max('priority'))['priority__max']
+                        self.priority = (max_p or 0) + 1
+
+                    # If moving UP (e.g. 5 -> 2)
+                    if self.priority < old_instance.priority:
+                        RoutineItem.objects.filter(
+                            routine=self.routine,
+                            priority__gte=self.priority,
+                            priority__lt=old_instance.priority
+                        ).update(priority=F('priority') + 1)
+                    
+                    # If moving DOWN (e.g. 2 -> 5)
+                    else:
+                        RoutineItem.objects.filter(
+                            routine=self.routine,
+                            priority__gt=old_instance.priority,
+                            priority__lte=self.priority
+                        ).update(priority=F('priority') - 1)
+                        
+            super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        """
+        Override delete to close the gap left by the deleted item.
+        """
+        current_priority = self.priority
+        current_routine = self.routine
         
-        if self.pk is not None:
-            # This is an existing item, remove it from query
-            qs = qs.exclude(pk=self.pk)
-
-        if self.pk is None:
-            # --- This is a NEW item ---
-            
-            # Handle "consecutive" logic (force gaps closed)
-            count = qs.count()
-            
-            # This is the new "default" logic you asked for.
-            # If priority wasn't provided (is None) or is out of bounds,
-            # set it to the end of the list.
-            if self.priority is None or self.priority > count:
-                self.priority = count
-            
-            # (If priority *was* provided and is valid, the 'items_to_shift'
-            # logic below will handle it)
-
-            with transaction.atomic():
-                # Handle "duplicates" (shift items down)
-                # Get items with priority >= new item's priority
-                # and lock them for update.
-                items_to_shift = qs.filter(
-                    priority__gte=self.priority
-                ).select_for_update()
-                
-                # Shift them down by 1 in a single, safe query
-                items_to_shift.update(priority=F('priority') + 1)
-                
-                # Now save the new item
-                super().save(*args, **kwargs)
-        
-        else:
-            # --- This is an EXISTING item ---
-            try:
-                # We need the old_self *before* any changes
-                old_self = RoutineItem.objects.get(pk=self.pk)
-            except RoutineItem.DoesNotExist:
-                super().save(*args, **kwargs) # Should not happen, but safe
-                return
-
-            if old_self.priority == self.priority:
-                # Priority didn't change, just save and exit
-                super().save(*args, **kwargs)
-                return
-
-            # Priority *did* change. This is a "move".
-            # The safest way to handle this and enforce consecutive logic
-            # is to re-number *everything* for this plan.
-            
-            with transaction.atomic():
-                # First, save the change (so self.priority is updated)
-                super().save(*args, **kwargs) 
-                
-                # Now, renumber *all* items for this plan
-                # This enforces the "consecutive" logic
-                
-                # Re-fetch the queryset *including* the just-saved item
-                all_items = RoutineItem.objects.filter(routine=self.routine)
-                items = all_items.order_by('priority', 'created_at').select_for_update()
-                
-                # Loop and re-save.
-                for i, item in enumerate(items):
-                    if item.priority != i:
-                        # Use update() to avoid re-triggering this save() method
-                        RoutineItem.objects.filter(pk=item.pk).update(priority=i)
+        with transaction.atomic():
+            super().delete(*args, **kwargs)
+            # Shift everything below this item up by 1
+            RoutineItem.objects.filter(
+                routine=current_routine,
+                priority__gt=current_priority
+            ).update(priority=F('priority') - 1)
